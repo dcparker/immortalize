@@ -4,11 +4,11 @@ require 'rake'
 begin
   require 'jeweler'
   Jeweler::Tasks.new do |gem|
-    gem.name = "dontdie"
+    gem.name = "immortalize"
     gem.summary = %Q{Restarts a specified process if it dies.}
     gem.description = %Q{Watch a specific process, restart it if it dies.}
     gem.email = "gems@behindlogic.com"
-    gem.homepage = "http://github.com/dcparker/dontdie"
+    gem.homepage = "http://github.com/dcparker/immortalize"
     gem.authors = ["BehindLogic"]
     gem.add_development_dependency "thoughtbot-shoulda", ">= 0"
     # gem is a Gem::Specification... see http://www.rubygems.org/read/chapter/20 for additional settings
@@ -47,7 +47,7 @@ Rake::RDocTask.new do |rdoc|
   version = File.exist?('VERSION') ? File.read('VERSION') : ""
 
   rdoc.rdoc_dir = 'rdoc'
-  rdoc.title = "dontdie #{version}"
+  rdoc.title = "immortalize #{version}"
   rdoc.rdoc_files.include('README*')
   rdoc.rdoc_files.include('lib/**/*.rb')
 end

@@ -6,6 +6,5 @@ trap('TERM') do
 end
 
 puts "I am process #{Process.pid}"
-sleep 30
+# sleep 1
 puts "Exiting"
-`touch exited`

@@ -1,0 +1,204 @@
+#!/usr/bin/env ruby
+
+# Usage:
+#   immortalize run "command --with-args --etc"
+#   immortalize remove "command --with-args --etc"
+#   immortalize inspect
+#   immortalize # << run this from a cron job every minute to check and restart failed processes. 
+#   * starts process
+#   * logs the start command with pid
+#   * when run from cron (without args), check all logged start commands and currently logged pid to see if it's running
+#     * if not running, immediately remove pid from log, but leave command; start process again via: immortalize "command --with-args --etc"
+require 'time'
+require 'yaml'
+require 'sha1'
+require 'optparse'
+$options = {}
+
+require 'rubygems'
+require 'merb-core'
+require 'merb-mailer'
+Merb::Mailer.delivery_method = :sendmail
+
+$log_location = "/var/log/immortalize"
+`mkdir -p "#{$log_location}"` unless File.directory?($log_location)
+$registry_filename = "#{$log_location}/registry.yaml"
+File.open($registry_filename, 'w'){|f| f << {}.to_yaml} unless File.exists?($registry_filename)
+$registry = YAML.load_file($registry_filename)
+
+optparse = OptionParser.new do |opts|
+  opts.banner = <<-ENDBANNER
+Usage: #{$0} [run|remove|inspect] [options]
+
+To add (and start) a command:
+#{$0} run "command" --notification_recipient admin@email.com --max_failures 5
+To change a command's options, just re-add it.
+
+To remove a command:
+#{$0} remove "command"
+
+To inspect the current list of immortal commands:
+#{$0} list
+
+Run this command with no arguments as a cron job, to run every minute:
+* * * * * immortalize
+ENDBANNER
+
+  # $options[:notification_recipient] = nil
+  opts.on( '--notification_recipient=[EMAIL]', "The email address to which failure notifications should be sent." ) do |email|
+    $options[:notification_recipient] = email
+  end
+
+  $options[:max_failures] = 5
+  opts.on('--max_failures=[NUM]', "Notify on NUM or more failures within an hour (default 5)") do |num|
+    $options[:max_failures] = num.to_i
+  end
+
+  opts.on( '-h', '--help', 'Display this screen' ) do
+    puts opts
+    exit
+  end
+end
+
+optparse.parse!
+$action = ARGV[0]
+
+def notify(immortal, message)
+  m = Merb::Mailer.new(
+    :to      => immortal[:notification_recipient],
+    :from    => "immortalize@video.iremix.org",
+    :subject => "ImmortalCommand `#{immortal[:command]}' keeps dying!",
+    :text    => message
+  )
+  m.deliver!
+end
+
+class Time
+  def beginning_of_day
+    Time.mktime(year, month, day).send(gmt? ? :gmt : :localtime)
+  end
+end
+
+class Immortal
+  attr_reader :identifier
+  def initialize(identifier)
+    @identifier = identifier
+    @reg = $registry[identifier]
+  end
+
+  def [](key)
+    @reg[key]
+  end
+
+  def running?
+    @reg[:pid] && `ps #{@reg[:pid]} | grep "#{@reg[:pid]}" | grep -v "grep"` =~ /#{@reg[:pid]}/
+  end
+
+  def failures
+    @failures ||= File.exists?(failure_log_file) ? File.readlines(failure_log_file).map {|t| Time.parse(t) } : []
+  end
+
+  def start!
+    # Run the command and gather the pid
+    pid = nil
+    open("|#{@reg[:command]} & echo $!") do |f|
+      pid = f.sysread(5).chomp.to_i
+    end
+    # Log the pid
+    puts "pid #{pid}"
+    $registry[identifier][:pid] = pid
+  end
+
+  def failed!
+    failures << Time.now
+    File.open(failure_log_file, 'a') do |log|
+      log << "#{Time.now}\n"
+    end
+  end
+
+  def frequent_failures?
+    # If it failed :max_failures times or more within the last hour.
+    failures.length >= self[:max_failures] && failures[0-self[:max_failures]] > Time.now - 3600
+  end
+  def failures_today
+    failures.select {|f| f > Time.now.beginning_of_day}
+  end
+  def failures_this_hour
+    failures_today.select {|f| f > Time.now - 3600}
+  end
+
+  def inspect
+    self[:command] + (failures.length >= self[:max_failures].to_i ? "\n\tLast #{self[:max_failures]} failures: #{failures[-5..1]}" : '')
+  end
+
+  private
+  def failure_log_file
+    "#{$log_location}/#{@identifier}"
+  end
+end
+
+# Main logic
+unless ::Object.const_defined?(:IRB)
+  case $action
+  when 'list'
+    puts $registry.inspect
+    puts "Immortalized:"
+    $registry.each_key do |identifier|
+      puts "\t+ " + Immortal.new(identifier).inspect
+    end
+    exit
+
+  when 'run'
+    # Running with a given command.
+    command_string = ARGV[1]
+    identifier = SHA1.hexdigest(command_string)
+
+    # Create the command
+    $registry[identifier] ||= {
+      :command => command_string
+    }
+    $registry[identifier].merge!($options)
+
+    immortal = Immortal.new(identifier)
+    # Start the process if it isn't already running
+    if immortal.running?
+      puts "`#{immortal[:command]}' is already running with pid #{immortal[:pid]}"
+    else
+      print "Starting `#{immortal[:command]}'... "
+      immortal.start!
+    end
+
+  when 'remove'
+    command_string = ARGV[1]
+    identifier = SHA1.hexdigest(command_string)
+    $registry.delete(identifier)
+
+  when nil
+    # Running bare from cron.
+    # Check all logged commands with pids.
+    $registry.each do |identifier,info|
+      immortal = Immortal.new(identifier)
+    
+      # Check if running
+      if immortal.running?
+        puts "`#{immortal[:command]}' is running fine..."
+      else
+        puts "`#{immortal[:command]}' HAS DIED! Reviving..."
+        # Mark the failure
+        immortal.failed!
+        # Notify if failures have been frequent
+        if immortal.frequent_failures?
+          puts "! FREQUENT FAILURE ON #{identifier} (`#{immortal[:command]}')"
+          notify(immortal, "ImmortalCommand failure!\n\nCommand `#{immortal[:command]}' failed, threshold is #{immortal[:max_failures]} / hour.\n\n#{immortal.failures_today.size} failures so far today, #{immortal.failures_this_hour.size} in the past hour.")
+        end
+        # Start it
+        immortal.start!
+      end
+    end
+  end
+end
+
+# Save the registry
+File.open("#{$log_location}/registry.yaml", 'w') do |r|
+  r << $registry.to_yaml
+end
