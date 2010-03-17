@@ -116,7 +116,7 @@ class Immortal
   def start!
     # Run the command and gather the pid
     pid = nil
-    open("|echo \"#{@reg[:command]}\" 1>/dev/null 2>&1 | sh & echo $!") do |f|
+    open("|echo \"#{@reg[:command]}\" 1>/dev/null 2>&1 & echo $!") do |f|
       pid = f.sysread(5).chomp.to_i
     end
     # Log the pid
@@ -170,14 +170,14 @@ if ARGV[1].to_s.length > 1 && ARGV[1] !~ /^\d+$/
   last_cmd = cmds.pop
   lst,out_s = last_cmd.split(/(?: \d)? ?>/,2)
   cmds << lst
-  outs = last_cmd.scan(/(?: \d)? ?> ?\S+/)
-  outs = outs.map {|o| o.sub(/^ ?> ?/,">").sub(/^>/,"1>").sub(/^ /,'') }
+  outs = last_cmd.scan(/(?: \d)? ?>>? ?\S+/)
+  outs = outs.map {|o| o.sub(/^ ?(>>)? ?/,"\\1").sub(/^>/,"1>").sub(/^ /,'') }
   unless outs.any? {|o| o =~ /^2>/}
     warn "Appending default STDERR redirection: 2>&1 (STDERR > STDOUT)"
     outs << "2>&1"
   end
-  unless outs.any? {|o| o =~ /^1?>/}
-    warn "#{$command_string}\nInvalid command: You need to add proper STDOUT redirection, ex: > /dev/null or 1>log/run.log or 1 > log/run.log"
+  unless outs.any? {|o| o =~ /^1>/}
+    warn "#{$command_string}\nInvalid command: You need to add proper STDOUT redirection, ex: >/dev/null or 1>log/run.log"
     exit
   end
   $command_string = cmds.join('; ') + ' ' + outs.join(' ')
@@ -194,8 +194,8 @@ unless ::Object.const_defined?(:IRB)
       warn "Couldn't find installed version of the 'immortalize' command! (Try `which immortalize`)"
       exit
     end
-    crons.reject! {|c| c =~ /immortalize > #{$log_location}\/cron.log/}
-    crons << "* * * * * #{immortalize_cmd} > #{$log_location}/cron.log 2>&1\n"
+    crons.reject! {|c| c =~ /immortalize >> #{$log_location}\/cron.log/}
+    crons << "* * * * * #{immortalize_cmd} >> #{$log_location}/cron.log 2>&1\n"
     puts "Installing crons:\n\t#{crons.join("\n\t")}"
     f = IO.popen("crontab -", 'w')
     f << crons.join("\n")
