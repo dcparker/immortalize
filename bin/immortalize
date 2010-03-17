@@ -20,7 +20,7 @@ require 'merb-core'
 require 'merb-mailer'
 Merb::Mailer.delivery_method = :sendmail
 
-$log_location = "/var/log/immortalize"
+$log_location = "#{ENV['HOME']}/.immortalize"
 `mkdir -p "#{$log_location}"` unless File.directory?($log_location)
 $registry_filename = "#{$log_location}/registry.yaml"
 File.open($registry_filename, 'w'){|f| f << {}.to_yaml} unless File.exists?($registry_filename)
@@ -40,17 +40,22 @@ To remove a command:
 To inspect the current list of immortal commands:
 #{$0} list
 
+To install the immortalize cron job (which does the actual work):
+immortalize setup
+
 Run this command with no arguments as a cron job, to run every minute:
 * * * * * immortalize
+
+Options:
 ENDBANNER
 
-  # $options[:notification_recipient] = nil
-  opts.on( '--notification_recipient=[EMAIL]', "The email address to which failure notifications should be sent." ) do |email|
+  $options[:notification_recipient] = nil
+  opts.on( '--notify=EMAIL', "The email address to which failure notifications should be sent." ) do |email|
     $options[:notification_recipient] = email
   end
 
   $options[:max_failures] = 5
-  opts.on('--max_failures=[NUM]', "Notify on NUM or more failures within an hour (default 5)") do |num|
+  opts.on('--max_failures=NUM', "Notify on NUM or more failures within an hour (default 5)") do |num|
     $options[:max_failures] = num.to_i
   end
 
@@ -80,6 +85,16 @@ class Time
 end
 
 class Immortal
+  def self.new(identifier)
+    if $registry[identifier]
+      obj = allocate
+      obj.send :initialize, identifier
+      obj
+    else
+      puts "tried:\n\t#{identifier}commands:\n\t#{$registry.values.map {|r| r[:command]}.join("\n\t")}"
+    end
+  end
+
   attr_reader :identifier
   def initialize(identifier)
     @identifier = identifier
@@ -101,12 +116,22 @@ class Immortal
   def start!
     # Run the command and gather the pid
     pid = nil
-    open("|#{@reg[:command]} & echo $!") do |f|
+    open("|echo \"#{@reg[:command]}\" 1>/dev/null 2>&1 | sh & echo $!") do |f|
       pid = f.sysread(5).chomp.to_i
     end
     # Log the pid
     puts "pid #{pid}"
     $registry[identifier][:pid] = pid
+  end
+  def stop!
+    if running?
+      pid = $registry[identifier].delete(:pid)
+      `kill -INT #{pid}`
+      puts "attempted to kill pid #{pid}: \"#{@reg[:command]}\""
+    else
+      warn "\"#{@reg[:command]}\" not running!"
+      false
+    end
   end
 
   def failed!
@@ -137,25 +162,77 @@ class Immortal
   end
 end
 
+# Curate the command string
+if ARGV[1].to_s.length > 1 && ARGV[1] !~ /^\d+$/
+  $command_string = ARGV[1]
+  # Complain about the string if it does not have proper output redirections
+  cmds = $command_string.split(/; ?/)
+  last_cmd = cmds.pop
+  lst,out_s = last_cmd.split(/(?: \d)? ?>/,2)
+  cmds << lst
+  outs = last_cmd.scan(/(?: \d)? ?> ?\S+/)
+  outs = outs.map {|o| o.sub(/^ ?> ?/,">").sub(/^>/,"1>").sub(/^ /,'') }
+  unless outs.any? {|o| o =~ /^2>/}
+    warn "Appending default STDERR redirection: 2>&1 (STDERR > STDOUT)"
+    outs << "2>&1"
+  end
+  unless outs.any? {|o| o =~ /^1?>/}
+    warn "#{$command_string}\nInvalid command: You need to add proper STDOUT redirection, ex: > /dev/null or 1>log/run.log or 1 > log/run.log"
+    exit
+  end
+  $command_string = cmds.join('; ') + ' ' + outs.join(' ')
+end
+
+
 # Main logic
 unless ::Object.const_defined?(:IRB)
   case $action
-  when 'list'
-    puts $registry.inspect
-    puts "Immortalized:"
-    $registry.each_key do |identifier|
-      puts "\t+ " + Immortal.new(identifier).inspect
+  when 'setup'
+    crons = `crontab -l 2>/dev/null`.split(/\n/)
+    immortalize_cmd = `which immortalize`.chomp
+    if immortalize_cmd.empty?
+      warn "Couldn't find installed version of the 'immortalize' command! (Try `which immortalize`)"
+      exit
     end
+    crons.reject! {|c| c =~ /immortalize > #{$log_location}\/cron.log/}
+    crons << "* * * * * #{immortalize_cmd} > #{$log_location}/cron.log 2>&1\n"
+    puts "Installing crons:\n\t#{crons.join("\n\t")}"
+    f = IO.popen("crontab -", 'w')
+    f << crons.join("\n")
+    f.close
+    crons = `crontab -l 2>/dev/null`.split(/\n/)
+    puts "Installed crons:\n\t#{crons.join("\n\t")}"
+  when 'list'
+    # puts $registry.inspect
+    puts "Immortalized:"
+    keys = $registry.keys.sort
+    keys.each_with_index do |identifier,i|
+      puts "\t#{i+1}) " + Immortal.new(identifier).inspect
+    end
+    puts "\nTo remove jobs, for example job #1, from this list, run `immortalize remove 1`"
     exit
 
+  when 'stop'
+    if ARGV[1] =~ /^\d+$/
+      identifier = $registry.keys.sort[ARGV[1].to_i-1]
+    else
+      identifier = SHA1.hexdigest($command_string)
+    end
+    immortal = Immortal.new(identifier)
+    immortal.stop!
+    
   when 'run'
+    if $options[:notification_recipient].nil?
+      warn "Must include --notify EMAIL_ADDRESS when adding a command!"
+      exit
+    end
+
     # Running with a given command.
-    command_string = ARGV[1]
-    identifier = SHA1.hexdigest(command_string)
+    identifier = SHA1.hexdigest($command_string)
 
     # Create the command
     $registry[identifier] ||= {
-      :command => command_string
+      :command => $command_string
     }
     $registry[identifier].merge!($options)
 
@@ -169,32 +246,39 @@ unless ::Object.const_defined?(:IRB)
     end
 
   when 'remove'
-    command_string = ARGV[1]
-    identifier = SHA1.hexdigest(command_string)
-    $registry.delete(identifier)
+    if ARGV[1] =~ /^\d+$/
+      identifier = $registry.keys.sort[ARGV[1].to_i-1]
+    else
+      identifier = SHA1.hexdigest($command_string)
+    end
+    reg = $registry.delete(identifier)
+    puts "Deleted #{identifier}: \"#{reg[:command]}\""
 
   when nil
     # Running bare from cron.
     # Check all logged commands with pids.
-    $registry.each do |identifier,info|
+    puts "[#{Time.now.strftime("%Y-%m-%d %H:%M:%S")}] #{$registry.length} jobs"
+    $registry.keys.sort.each_with_index do |identifier,i|
       immortal = Immortal.new(identifier)
     
       # Check if running
       if immortal.running?
-        puts "`#{immortal[:command]}' is running fine..."
+        # puts "  #{i+1}) `#{immortal[:command]}' is running fine..."
       else
-        puts "`#{immortal[:command]}' HAS DIED! Reviving..."
+        puts "  #{i+1}) `#{immortal[:command]}' HAS DIED! Reviving..."
         # Mark the failure
         immortal.failed!
         # Notify if failures have been frequent
         if immortal.frequent_failures?
-          puts "! FREQUENT FAILURE ON #{identifier} (`#{immortal[:command]}')"
+          puts "  #{i+1}) FREQUENT FAILURE ON #{identifier} (`#{immortal[:command]}')"
           notify(immortal, "ImmortalCommand failure!\n\nCommand `#{immortal[:command]}' failed, threshold is #{immortal[:max_failures]} / hour.\n\n#{immortal.failures_today.size} failures so far today, #{immortal.failures_this_hour.size} in the past hour.")
         end
         # Start it
         immortal.start!
       end
     end
+  else
+    puts optparse
   end
 end
 
