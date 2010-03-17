@@ -20,12 +20,6 @@ require 'merb-core'
 require 'merb-mailer'
 Merb::Mailer.delivery_method = :sendmail
 
-$log_location = "#{ENV['HOME']}/.immortalize"
-`mkdir -p "#{$log_location}"` unless File.directory?($log_location)
-$registry_filename = "#{$log_location}/registry.yaml"
-File.open($registry_filename, 'w'){|f| f << {}.to_yaml} unless File.exists?($registry_filename)
-$registry = YAML.load_file($registry_filename)
-
 optparse = OptionParser.new do |opts|
   opts.banner = <<-ENDBANNER
 Usage: #{$0} [run|remove|inspect] [options]
@@ -59,13 +53,28 @@ ENDBANNER
     $options[:max_failures] = num.to_i
   end
 
+  $log_location = "#{ENV['HOME']}/.immortalize"
+  opts.on('--log-location=PATH', "Manually set the location for immortalize to keep its registry and cron.log (default #{$log_location})") do |path|
+    if !File.directory?(path)
+      warn "`#{path}' is not a valid path."
+      exit 1
+    end
+    $log_location = path
+  end
+
   opts.on( '-h', '--help', 'Display this screen' ) do
     puts opts
     exit
   end
 end
-
 optparse.parse!
+
+
+`mkdir -p "#{$log_location}"` unless File.directory?($log_location)
+$registry_filename = "#{$log_location}/registry.yaml"
+File.open($registry_filename, 'w'){|f| f << {}.to_yaml} unless File.exists?($registry_filename)
+$registry = YAML.load_file($registry_filename)
+
 $action = ARGV[0]
 
 def notify(immortal, message)
@@ -116,7 +125,7 @@ class Immortal
   def start!
     # Run the command and gather the pid
     pid = nil
-    open("|echo \"#{@reg[:command]}\" 1>/dev/null 2>&1 & echo $!") do |f|
+    open("|#{@reg[:command]} 1>/dev/null & echo $!") do |f|
       pid = f.sysread(5).chomp.to_i
     end
     # Log the pid
@@ -153,7 +162,7 @@ class Immortal
   end
 
   def inspect
-    self[:command] + (failures.length >= self[:max_failures].to_i ? "\n\tLast #{self[:max_failures]} failures: #{failures[-5..1]}" : '')
+    self[:command] + (failures.length >= self[:max_failures].to_i ? "\n\tLast #{self[:max_failures]} failures: #{failures[-5..1].join(", ")}" : '')
   end
 
   private
@@ -194,8 +203,8 @@ unless ::Object.const_defined?(:IRB)
       warn "Couldn't find installed version of the 'immortalize' command! (Try `which immortalize`)"
       exit
     end
-    crons.reject! {|c| c =~ /immortalize >> #{$log_location}\/cron.log/}
-    crons << "* * * * * #{immortalize_cmd} >> #{$log_location}/cron.log 2>&1\n"
+    crons.reject! {|c| c =~ /immortalize.*>> #{$log_location}\/cron.log/}
+    crons << "* * * * * #{immortalize_cmd} --log-location=\"#{$log_location}\" >> #{$log_location}/cron.log 2>&1\n"
     puts "Installing crons:\n\t#{crons.join("\n\t")}"
     f = IO.popen("crontab -", 'w')
     f << crons.join("\n")
