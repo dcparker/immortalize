@@ -25,8 +25,10 @@ optparse = OptionParser.new do |opts|
 Usage: #{$0} [run|remove|inspect] [options]
 
 To add (and start) a command:
-#{$0} run "command" --notification_recipient admin@email.com --max_failures 5
+#{$0} run "command" --notify admin@email.com --max_failures 5
 To change a command's options, just re-add it.
+You can group commands by adding a --group option, which allows
+you to perform future actions on all commands in the group.
 
 To stop a daemon:
 #{$0} stop "command"
@@ -50,14 +52,19 @@ Run this command with no arguments as a cron job, to run every minute:
 Options:
 ENDBANNER
 
-  $options[:notification_recipient] = nil
+  $options[:notify] = nil
   opts.on( '--notify EMAIL', "The email address to which failure notifications should be sent." ) do |email|
-    $options[:notification_recipient] = email
+    $options[:notify] = email
   end
 
   $options[:max_failures] = 5
   opts.on('--max_failures NUM', "Notify on NUM or more failures within an hour (default 5)") do |num|
     $options[:max_failures] = num.to_i
+  end
+
+  $options[:group] = nil
+  opts.on('--group GROUP', "Set the group of immortal commands that this command belongs to.") do |group|
+    $options[:group] = group
   end
 
   $log_location = "#{ENV['HOME']}/.immortalize"
@@ -86,7 +93,7 @@ $action = ARGV[0]
 
 def notify(immortal, message)
   m = Merb::Mailer.new(
-    :to      => immortal[:notification_recipient],
+    :to      => immortal[:notify],
     :from    => "immortalize@video.iremix.org",
     :subject => "ImmortalCommand `#{immortal[:command]}' keeps dying!",
     :text    => message
@@ -109,6 +116,10 @@ class Immortal
     else
       puts "tried:\n\t#{identifier}commands:\n\t#{$registry.values.map {|r| r[:command]}.join("\n\t")}"
     end
+  end
+
+  def self.in_group(group)
+    $registry.select {|k,i| i[:group] == group}.collect { |k,i| new(k) }
   end
 
   attr_reader :identifier
@@ -169,7 +180,7 @@ class Immortal
   end
 
   def inspect
-    self[:command] + (failures.length >= self[:max_failures].to_i ? "\n\tLast #{self[:max_failures]} failures: #{failures[-5..1].join(", ")}" : '')
+    self[:command] + (" (group=#{self[:group]})" if self[:group]).to_s + (failures.length >= self[:max_failures].to_i ? "\n\tLast #{self[:max_failures]} failures: #{failures[-5..1].join(", ")}" : '')
   end
 
   private
@@ -179,6 +190,7 @@ class Immortal
 end
 
 # Curate the command string
+$command_string = nil
 if ARGV[1].to_s.length > 1 && ARGV[1] !~ /^\d+$/ && ARGV[1] != 'all'
   $command_string = ARGV[1]
   # Complain about the string if it does not have proper output redirections
@@ -234,13 +246,19 @@ unless ::Object.const_defined?(:IRB)
         immortal.stop!
       end
     else
-      identifier = SHA1.hexdigest($command_string)
-      immortal = Immortal.new(identifier)
-      immortal.stop!
+      if $command_string
+        identifier = SHA1.hexdigest($command_string)
+        immortal = Immortal.new(identifier)
+        immortal.stop!
+      elsif $options[:group]
+        Immortal.in_group($options[:group]).each do |immortal|
+          immortal.stop!
+        end
+      end
     end
     
   when 'run'
-    if $options[:notification_recipient].nil?
+    if $options[:notify].nil?
       warn "Must include --notify EMAIL_ADDRESS when adding a command!"
       exit
     end
@@ -250,7 +268,8 @@ unless ::Object.const_defined?(:IRB)
 
     # Create the command
     $registry[identifier] ||= {
-      :command => $command_string
+      :command => $command_string,
+      :group => $options[:group]
     }
     $registry[identifier].merge!($options)
 
@@ -274,9 +293,16 @@ unless ::Object.const_defined?(:IRB)
         puts "Deleted #{identifier}: \"#{reg[:command]}\""
       end
     else
-      identifier = SHA1.hexdigest($command_string)
-      reg = $registry.delete(identifier)
-      puts "Deleted #{identifier}: \"#{reg[:command]}\""
+      if $command_string
+        identifier = SHA1.hexdigest($command_string)
+        reg = $registry.delete(identifier)
+        puts "Deleted #{identifier}: \"#{reg[:command]}\""
+      elsif $options[:group]
+        Immortal.in_group($options[:group]).each do |immortal|
+          reg = $registry.delete(immortal.identifier)
+          puts "Deleted #{immortal.identifier}: \"#{reg[:command]}\""
+        end
+      end
     end
 
   when nil
