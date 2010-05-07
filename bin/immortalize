@@ -87,7 +87,10 @@ optparse.parse!
 `mkdir -p "#{$log_location}"` unless File.directory?($log_location)
 $registry_filename = "#{$log_location}/registry.yaml"
 File.open($registry_filename, 'w'){|f| f << {}.to_yaml} unless File.exists?($registry_filename)
-$registry = YAML.load_file($registry_filename)
+unless $registry = YAML.load_file($registry_filename)
+  File.open($registry_filename, 'w'){|f| f << {}.to_yaml}
+  $registry = {}
+end
 
 $action = ARGV[0]
 
@@ -334,6 +337,13 @@ unless ::Object.const_defined?(:IRB)
 end
 
 # Save the registry
-File.open("#{$log_location}/registry.yaml", 'w') do |r|
+File.open("#{$log_location}/registry.yaml~", 'w') do |r|
   r << $registry.to_yaml
+end
+# Swap files back out IF registry was written correctly.
+if File.read("#{$log_location}/registry.yaml~") == $registry.to_yaml
+  File.delete("#{$log_location}/registry.yaml")
+  File.move("#{$log_location}/registry.yaml~", "#{$log_location}/registry.yaml")
+else
+  raise "PROBLEM WRITING TO #{$log_location}/registry.yaml!"
 end

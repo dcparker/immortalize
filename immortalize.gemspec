@@ -5,11 +5,11 @@
 
 Gem::Specification.new do |s|
   s.name = %q{immortalize}
-  s.version = "0.2.2"
+  s.version = "0.2.3"
 
   s.required_rubygems_version = Gem::Requirement.new(">= 0") if s.respond_to? :required_rubygems_version=
   s.authors = ["BehindLogic"]
-  s.date = %q{2010-04-27}
+  s.date = %q{2010-05-07}
   s.default_executable = %q{immortalize}
   s.description = %q{Watch a specific process, restart it if it dies.}
   s.email = %q{gems@behindlogic.com}
