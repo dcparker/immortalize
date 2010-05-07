@@ -12,6 +12,7 @@
 require 'time'
 require 'yaml'
 require 'sha1'
+require 'ftools'
 require 'optparse'
 $options = {}
 
